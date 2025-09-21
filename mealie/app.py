@@ -11,11 +11,12 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.routing import APIRoute
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from mealie.core.config import get_app_settings
 from mealie.core.root_logger import get_logger
@@ -163,6 +164,30 @@ for route in app.routes:
         route.tags = list(set(route.tags))
 
 
+class CSRFMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Only enforce on state-changing methods where cookie auth might be used
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            # If auth cookie is present, require Origin/Referer to match BASE_URL
+            if "mealie.access_token" in request.cookies:
+                origin = request.headers.get("origin") or ""
+                referer = request.headers.get("referer") or ""
+                allowed = settings.BASE_URL
+                if not (origin.startswith(allowed) or referer.startswith(allowed)):
+                    from fastapi import status as _status
+                    from fastapi.responses import JSONResponse
+
+                    return JSONResponse(
+                        status_code=_status.HTTP_403_FORBIDDEN,
+                        content={"detail": "CSRF check failed"},
+                    )
+
+        return await call_next(request)
+
+
+app.add_middleware(CSRFMiddleware)
+
+
 def main():
     uvicorn.run(
         "app:app",
@@ -175,7 +200,7 @@ def main():
         use_colors=True,
         log_config=None,
         workers=1,
-        forwarded_allow_ips="*",
+        forwarded_allow_ips=settings.HOST_IP,
     )
 
 
