@@ -52,6 +52,10 @@ Mealie is a self hosted recipe manager, meal planner and shopping list with a Re
 - Docker: Easy **Docker** deployment
 - Localisation: **Translations** for 35+ languages
 
+### Security configuration
+- BASE_URL: Set to your frontend origin (scheme+host+port). In development, use `http://localhost:3000` to match the Nuxt app; in production, set to your public site origin. This is used for CSRF Origin/Referer checks.
+- HOST_IP: Set to a comma-separated list of trusted proxy IPs or networks (e.g. `127.0.0.1,10.0.0.0/8`) for forwarded header trust. Avoid `*` in production.
+
 <!-- CONTRIBUTING -->
 ## Contributing
 
