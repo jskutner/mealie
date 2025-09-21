@@ -1,6 +1,7 @@
 import ipaddress
 import logging
 import socket
+from typing import Iterable
 
 import httpx
 
@@ -41,36 +42,60 @@ class AsyncSafeTransport(httpx.AsyncBaseTransport):
         # validate the request is not attempting to connect to a local IP
         # This is a security measure to prevent SSRF attacks
 
-        ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
+        def is_disallowed_ip(candidate: ipaddress._BaseAddress) -> bool:
+            """Return True if the IP should be blocked for SSRF protection."""
+            return (
+                candidate.is_private
+                or candidate.is_loopback
+                or candidate.is_link_local
+                or candidate.is_multicast
+                or candidate.is_reserved
+                or candidate.is_unspecified
+                or candidate in ipaddress.ip_network("100.64.0.0/10")
+            )
 
-        netloc = request.url.netloc.decode()
-        if ":" in netloc:  # Either an IP, or a hostname:port combo
-            netloc_parts = netloc.split(":")
-
-            netloc = netloc_parts[0]
-
+        def resolve_all(hostname: str) -> Iterable[ipaddress._BaseAddress]:
+            """Resolve all A/AAAA records for a hostname; if it's already an IP, yield it."""
             try:
-                ip = ipaddress.ip_address(netloc)
+                # If hostname is a literal IP
+                yield ipaddress.ip_address(hostname)
+                return
             except ValueError:
-                if self._log:
-                    self._log.debug(f"failed to parse ip for {netloc=} falling back to domain resolution")
                 pass
 
-        # Request is a domain or a hostname.
-        if not ip:
-            if self._log:
-                self._log.debug(f"resolving IP for domain: {netloc}")
+            try:
+                for family in (socket.AF_INET, socket.AF_INET6):
+                    try:
+                        infos = socket.getaddrinfo(hostname, None, family, socket.SOCK_STREAM)
+                    except socket.gaierror:
+                        continue
+                    for info in infos:
+                        addr = info[4][0]
+                        try:
+                            yield ipaddress.ip_address(addr)
+                        except ValueError:
+                            continue
+            except Exception:
+                # Fall back to single resolution
+                try:
+                    ip_str = socket.gethostbyname(hostname)
+                    yield ipaddress.ip_address(ip_str)
+                except Exception:
+                    return
 
-            ip_str = socket.gethostbyname(netloc)
-            ip = ipaddress.ip_address(ip_str)
+        netloc = request.url.netloc.decode()
+        host = netloc.split(":", 1)[0]
 
-            if self._log:
-                self._log.debug(f"resolved IP for domain: {netloc} -> {ip}")
-
-        if ip.is_private:
-            if self._log:
-                self._log.warning(f"invalid request on local resource: {request.url} -> {ip}")
-            raise InvalidDomainError(f"invalid request on local resource: {request.url} -> {ip}")
+        # Validate all resolved addresses
+        for resolved_ip in resolve_all(host):
+            if is_disallowed_ip(resolved_ip):
+                if self._log:
+                    self._log.warning(
+                        f"invalid request on disallowed IP for {request.url} -> {resolved_ip}"
+                    )
+                raise InvalidDomainError(
+                    f"invalid request on disallowed IP for {request.url} -> {resolved_ip}"
+                )
 
         return await self._wrapper.handle_async_request(request)
 
