@@ -11,11 +11,12 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.routing import APIRoute
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from mealie.core.config import get_app_settings
 from mealie.core.root_logger import get_logger
@@ -163,6 +164,51 @@ for route in app.routes:
         route.tags = list(set(route.tags))
 
 
+class CSRFMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Skip CSRF checks in development to ease local workflows
+        if not settings.PRODUCTION:
+            return await call_next(request)
+
+        # Only enforce on state-changing methods where cookie auth might be used
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            # If auth cookie is present, require Origin/Referer to match BASE_URL exactly (scheme+host+port)
+            if "mealie.access_token" in request.cookies:
+                origin = request.headers.get("origin") or ""
+                referer = request.headers.get("referer") or ""
+
+                try:
+                    from urllib.parse import urlparse
+                    allowed_parts = urlparse(settings.BASE_URL)
+                    allowed = (allowed_parts.scheme, allowed_parts.hostname, allowed_parts.port)
+
+                    def is_allowed(url: str) -> bool:
+                        if not url:
+                            return False
+                        parts = urlparse(url)
+                        host_port = parts.port
+                        # Infer default port if missing
+                        if host_port is None:
+                            host_port = 443 if parts.scheme == "https" else 80
+                        return (parts.scheme, parts.hostname, host_port) == (
+                            allowed[0], allowed[1], allowed[2] or (443 if allowed_parts.scheme == "https" else 80)
+                        )
+
+                    if not (is_allowed(origin) or is_allowed(referer)):
+                        from fastapi import status as _status
+                        from fastapi.responses import JSONResponse
+                        return JSONResponse(status_code=_status.HTTP_403_FORBIDDEN, content={"detail": "CSRF check failed"})
+                except Exception:
+                    from fastapi import status as _status
+                    from fastapi.responses import JSONResponse
+                    return JSONResponse(status_code=_status.HTTP_403_FORBIDDEN, content={"detail": "CSRF check failed"})
+
+        return await call_next(request)
+
+
+app.add_middleware(CSRFMiddleware)
+
+
 def main():
     uvicorn.run(
         "app:app",
@@ -175,7 +221,7 @@ def main():
         use_colors=True,
         log_config=None,
         workers=1,
-        forwarded_allow_ips="*",
+        forwarded_allow_ips=settings.HOST_IP,
     )
 
 
